@@ -927,6 +927,7 @@ extension Ghostty.Config {
 
         static let bell = NotifyOnCommandFinishAction(rawValue: 1 << 0)
         static let notify = NotifyOnCommandFinishAction(rawValue: 1 << 1)
+        static let present = NotifyOnCommandFinishAction(rawValue: 1 << 2)
     }
 
     enum MacOSTitlebarStyle: String {

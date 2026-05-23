@@ -1223,6 +1223,8 @@ command: ?Command = null,
 ///
 /// * `bell` - enabled by default
 /// * `notify` - disabled by default
+/// * `present` - disabled by default; raises and focuses the terminal
+///   window where the command finished
 ///
 /// Options can be combined by listing them as a comma separated list. Options
 /// can be negated by prefixing them with `no-`. For example `no-bell,notify`.
@@ -10244,6 +10246,7 @@ pub const NotifyOnCommandFinish = enum {
 pub const NotifyOnCommandFinishAction = packed struct {
     bell: bool = true,
     notify: bool = false,
+    present: bool = false,
 };
 
 test "parse duration" {

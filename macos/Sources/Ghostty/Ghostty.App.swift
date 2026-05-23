@@ -746,45 +746,37 @@ extension Ghostty {
         }
 
         private static func undo(_ app: ghostty_app_t, target: ghostty_target_s) -> Bool {
-            let undoManager: UndoManager?
-            switch target.tag {
-            case GHOSTTY_TARGET_APP:
-                undoManager = (NSApp.delegate as? AppDelegate)?.undoManager
-
-            case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return false }
-                guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                undoManager = surfaceView.undoManager
-
-            default:
-                assertionFailure()
-                return false
-            }
-
-            guard let undoManager, undoManager.canUndo else { return false }
+            guard let undoManager = undoManager(for: target) else { return false }
+            guard undoManager.canUndo else { return false }
             undoManager.undo()
             return true
         }
 
         private static func redo(_ app: ghostty_app_t, target: ghostty_target_s) -> Bool {
-            let undoManager: UndoManager?
+            guard let undoManager = undoManager(for: target) else { return false }
+            guard undoManager.canRedo else { return false }
+            undoManager.redo()
+            return true
+        }
+
+        private static func undoManager(for target: ghostty_target_s) -> UndoManager? {
             switch target.tag {
             case GHOSTTY_TARGET_APP:
-                undoManager = (NSApp.delegate as? AppDelegate)?.undoManager
+                return NSApp.keyWindow?.undoManager ??
+                    NSApp.mainWindow?.undoManager ??
+                    (NSApp.delegate as? AppDelegate)?.undoManager
 
             case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return false }
-                guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                undoManager = surfaceView.undoManager
+                guard let surface = target.target.surface else { return nil }
+                guard let surfaceView = self.surfaceView(from: surface) else { return nil }
+                return surfaceView.window?.undoManager ??
+                    surfaceView.undoManager ??
+                    (NSApp.delegate as? AppDelegate)?.undoManager
 
             default:
                 assertionFailure()
-                return false
+                return nil
             }
-
-            guard let undoManager, undoManager.canRedo else { return false }
-            undoManager.redo()
-            return true
         }
 
         private static func newWindow(_ app: ghostty_app_t, target: ghostty_target_s) {
@@ -1483,6 +1475,10 @@ extension Ghostty {
                         body: body,
                         requireFocus: false
                     )
+                }
+
+                if actions.contains(.present) {
+                    _ = presentTerminal(app, target: target)
                 }
 
             default:

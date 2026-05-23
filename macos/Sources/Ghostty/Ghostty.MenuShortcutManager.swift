@@ -79,9 +79,15 @@ private extension Ghostty.MenuShortcutManager {
     ///
     /// - Returns: Whether the menu item is updated and saved in ``menuItemsByShortcut``
     func updateMenuShortcut(_ config: Ghostty.Config, action: String?, menuItem menu: NSMenuItem) -> Bool {
+        guard let action else {
+            return false
+        }
+
+        let shortcut = config.keyboardShortcut(for: action) ??
+            Self.defaultNativeShortcut(for: action)
+
         guard
-            let action,
-            let shortcut = config.keyboardShortcut(for: action),
+            let shortcut,
             // Build a direct lookup for key-equivalent dispatch so we don't need to
             // linearly walk the full menu hierarchy at event time.
             let key = MenuShortcutKey(shortcut)
@@ -95,6 +101,17 @@ private extension Ghostty.MenuShortcutManager {
         // Later registrations intentionally override earlier ones for the same key.
         menuItemsByShortcut[key] = .init(menu)
         return true
+    }
+
+    static func defaultNativeShortcut(for action: String) -> KeyboardShortcut? {
+        switch action {
+        case "undo":
+            KeyboardShortcut("z", modifiers: .command)
+        case "redo":
+            KeyboardShortcut("z", modifiers: [.command, .shift])
+        default:
+            nil
+        }
     }
 }
 

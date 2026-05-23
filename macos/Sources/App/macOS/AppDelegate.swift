@@ -1003,11 +1003,19 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func undo(_ sender: Any?) {
-        undoManager.undo()
+        activeUndoManager.undo()
     }
 
     @IBAction func redo(_ sender: Any?) {
-        undoManager.redo()
+        activeUndoManager.redo()
+    }
+
+    private var activeUndoManager: UndoManager {
+        if let manager = NSApp.keyWindow?.undoManager {
+            return manager
+        }
+
+        return undoManager
     }
 
     private struct DerivedConfig {
@@ -1271,20 +1279,22 @@ extension AppDelegate: NSMenuItemValidation {
             return NSApp.keyWindow is TerminalWindow
 
         case #selector(undo(_:)):
-            if undoManager.canUndo {
-                item.title = "Undo \(undoManager.undoActionName)"
+            let manager = activeUndoManager
+            if manager.canUndo {
+                item.title = "Undo \(manager.undoActionName)"
             } else {
                 item.title = "Undo"
             }
-            return undoManager.canUndo
+            return manager.canUndo
 
         case #selector(redo(_:)):
-            if undoManager.canRedo {
-                item.title = "Redo \(undoManager.redoActionName)"
+            let manager = activeUndoManager
+            if manager.canRedo {
+                item.title = "Redo \(manager.redoActionName)"
             } else {
                 item.title = "Redo"
             }
-            return undoManager.canRedo
+            return manager.canRedo
 
         default:
             return true

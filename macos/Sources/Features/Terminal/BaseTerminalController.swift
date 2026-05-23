@@ -739,7 +739,11 @@ class BaseTerminalController: NSWindowController,
         guard surfaceTree.contains(target) else { return }
 
         // Bring the window to front and focus the surface.
+        window?.deminiaturize(nil)
         window?.makeKeyAndOrderFront(nil)
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         // We use a small delay to ensure this runs after any UI cleanup
         // (e.g., command palette restoring focus to its original surface).
