@@ -42,6 +42,7 @@ final class GhosttyQuickActionsModel: ObservableObject {
     let notifyThresholds = [3, 8, 15, 30, 60]
     let dictationDurations = [3, 5, 8, 12]
 
+    @Published var floatOnTopEnabled: Bool
     @Published var isDictating = false
     @Published var statusText: String?
 
@@ -81,6 +82,7 @@ final class GhosttyQuickActionsModel: ObservableObject {
     }
 
     private var speechSession: SpeechSession?
+    private var dictationKeyMonitor: Any?
 
     private enum Keys {
         static let language = "GhosttyQuickActions.language"
@@ -103,26 +105,31 @@ final class GhosttyQuickActionsModel: ObservableObject {
         self.finishSoundThreshold = threshold == 0 ? 8 : threshold
         let seconds = defaults.integer(forKey: Keys.dictationSeconds)
         self.dictationSeconds = seconds == 0 ? 5 : seconds
+        let defaultWindowLevel = UserDefaults.ghostty.value(
+            forKey: TerminalWindow.defaultLevelKey) as? NSWindow.Level
+        self.floatOnTopEnabled = defaultWindowLevel == .floating
         writeShellSettings()
     }
 
     func startDictation(controllerProvider: @escaping () -> TerminalController?) {
         guard !isDictating else {
-            stopDictation()
+            finishDictation()
             return
         }
 
         isDictating = true
-        statusText = "Listening..."
+        statusText = "Recording. Press Enter to stop."
+        installDictationKeyMonitor()
         QuickActionSound.play("Tink")
 
-        let session = SpeechSession(localeIdentifier: language, seconds: TimeInterval(dictationSeconds))
+        let session = SpeechSession(localeIdentifier: language)
         speechSession = session
         session.start { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 self.isDictating = false
                 self.speechSession = nil
+                self.removeDictationKeyMonitor()
 
                 switch result {
                 case .success(let transcript):
@@ -144,24 +151,93 @@ final class GhosttyQuickActionsModel: ObservableObject {
         }
     }
 
-    func stopDictation() {
+    func finishDictation() {
+        guard isDictating else { return }
+        statusText = "Stopping..."
         speechSession?.stop()
-        speechSession = nil
-        isDictating = false
-        statusText = nil
     }
 
-    func chooseFilesAndInsert(controllerProvider: @escaping () -> TerminalController?) {
+    func cancelDictation() {
+        guard isDictating else { return }
+        speechSession?.cancel()
+        speechSession = nil
+        isDictating = false
+        statusText = "Cancelled"
+        removeDictationKeyMonitor()
+        QuickActionSound.play("Basso")
+    }
+
+    private func installDictationKeyMonitor() {
+        removeDictationKeyMonitor()
+        dictationKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            switch event.keyCode {
+            case 36, 76:
+                Task { @MainActor in self?.finishDictation() }
+                return nil
+            case 53:
+                Task { @MainActor in self?.cancelDictation() }
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeDictationKeyMonitor() {
+        guard let dictationKeyMonitor else { return }
+        NSEvent.removeMonitor(dictationKeyMonitor)
+        self.dictationKeyMonitor = nil
+    }
+
+    func toggleFloatOnTop(controllerProvider: @escaping () -> TerminalController?) {
+        guard let window = controllerProvider()?.window else {
+            QuickActionSound.play("Basso")
+            return
+        }
+
+        let nextEnabled = window.level != .floating
+        window.level = nextEnabled ? .floating : .normal
+        floatOnTopEnabled = nextEnabled
+
+        let defaults = UserDefaults.ghostty
+        if nextEnabled {
+            defaults.set(NSWindow.Level.floating, forKey: TerminalWindow.defaultLevelKey)
+        } else {
+            defaults.removeObject(forKey: TerminalWindow.defaultLevelKey)
+        }
+
+        QuickActionSound.play(nextEnabled ? "Tink" : "Pop")
+    }
+
+    func chooseFilesAndInsertAbsolute(controllerProvider: @escaping () -> TerminalController?) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
-        panel.prompt = "Insert"
-        panel.message = "Choose files or folders to insert into the focused terminal."
+        panel.prompt = "Insert Paths"
+        panel.message = "Choose files or folders to insert as absolute paths."
         panel.directoryURL = controllerProvider()?.ghosttyQuickActionsWorkingDirectory
 
         present(panel, controllerProvider: controllerProvider) { urls in
             let text = urls.map { Ghostty.Shell.escape($0.path) }.joined(separator: " ") + " "
+            controllerProvider()?.ghosttyQuickActionsInsertText(text)
+        }
+    }
+
+    func chooseFilesAndInsertRelative(controllerProvider: @escaping () -> TerminalController?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Insert Relative"
+        panel.message = "Choose files or folders to insert relative to the focused terminal."
+        let workingDirectory = controllerProvider()?.ghosttyQuickActionsWorkingDirectory
+        panel.directoryURL = workingDirectory
+
+        present(panel, controllerProvider: controllerProvider) { urls in
+            let text = urls
+                .map { Ghostty.Shell.escape(self.relativePath(for: $0, from: workingDirectory)) }
+                .joined(separator: " ") + " "
             controllerProvider()?.ghosttyQuickActionsInsertText(text)
         }
     }
@@ -180,6 +256,35 @@ final class GhosttyQuickActionsModel: ObservableObject {
         }
     }
 
+    func chooseFilesAndReveal(controllerProvider: @escaping () -> TerminalController?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Reveal"
+        panel.message = "Choose files or folders to reveal in Finder."
+        panel.directoryURL = controllerProvider()?.ghosttyQuickActionsWorkingDirectory
+
+        present(panel, controllerProvider: controllerProvider) { urls in
+            NSWorkspace.shared.activateFileViewerSelecting(urls)
+        }
+    }
+
+    func chooseDirectoryAndChange(controllerProvider: @escaping () -> TerminalController?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "cd"
+        panel.message = "Choose a folder and run cd in the focused terminal."
+        panel.directoryURL = controllerProvider()?.ghosttyQuickActionsWorkingDirectory
+
+        present(panel, controllerProvider: controllerProvider) { urls in
+            guard let url = urls.first else { return }
+            controllerProvider()?.ghosttyQuickActionsInsertText("cd \(Ghostty.Shell.escape(url.path))\n")
+        }
+    }
+
     func insertWorkingDirectory(controllerProvider: @escaping () -> TerminalController?) {
         guard let url = controllerProvider()?.ghosttyQuickActionsWorkingDirectory else {
             QuickActionSound.play("Basso")
@@ -187,6 +292,15 @@ final class GhosttyQuickActionsModel: ObservableObject {
         }
 
         controllerProvider()?.ghosttyQuickActionsInsertText(Ghostty.Shell.escape(url.path) + " ")
+    }
+
+    func openWorkingDirectoryInFinder(controllerProvider: @escaping () -> TerminalController?) {
+        guard let url = controllerProvider()?.ghosttyQuickActionsWorkingDirectory else {
+            QuickActionSound.play("Basso")
+            return
+        }
+
+        NSWorkspace.shared.open(url)
     }
 
     func playFinishSound() {
@@ -211,6 +325,19 @@ final class GhosttyQuickActionsModel: ObservableObject {
         } else if panel.runModal() == .OK {
             onChoose(panel.urls)
         }
+    }
+
+    private func relativePath(for url: URL, from workingDirectory: URL?) -> String {
+        guard let workingDirectory else { return url.path }
+
+        let basePath = workingDirectory.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        if path == basePath { return "." }
+        if path.hasPrefix(basePath + "/") {
+            return String(path.dropFirst(basePath.count + 1))
+        }
+
+        return path
     }
 
     private func writeShellSettings() {
@@ -261,6 +388,7 @@ struct GhosttyQuickActionsTitlebarView: View {
 
     var body: some View {
         HStack(spacing: 5) {
+            pinButton
             fileMenu
             micButton
             soundMenu
@@ -271,20 +399,48 @@ struct GhosttyQuickActionsTitlebarView: View {
         .frame(height: 24)
     }
 
+    private var pinButton: some View {
+        Button {
+            model.toggleFloatOnTop(controllerProvider: controllerProvider)
+        } label: {
+            Image(systemName: model.floatOnTopEnabled ? "pin.fill" : "pin")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(model.floatOnTopEnabled ? Color.accentColor : Color.primary)
+                .frame(width: 22, height: 20)
+        }
+        .help(model.floatOnTopEnabled ? "Floating on Top" : "Float on Top")
+    }
+
     private var fileMenu: some View {
         Menu {
-            Button("Insert File Path...") {
-                model.chooseFilesAndInsert(controllerProvider: controllerProvider)
+            Button("Insert Absolute Paths...") {
+                model.chooseFilesAndInsertAbsolute(controllerProvider: controllerProvider)
             }
 
-            Button("Preview File...") {
+            Button("Insert Relative Paths...") {
+                model.chooseFilesAndInsertRelative(controllerProvider: controllerProvider)
+            }
+
+            Button("Preview with Quick Look...") {
                 model.chooseFilesAndPreview(controllerProvider: controllerProvider)
+            }
+
+            Button("Reveal in Finder...") {
+                model.chooseFilesAndReveal(controllerProvider: controllerProvider)
             }
 
             Divider()
 
             Button("Insert Working Directory") {
                 model.insertWorkingDirectory(controllerProvider: controllerProvider)
+            }
+
+            Button("Open Working Directory") {
+                model.openWorkingDirectoryInFinder(controllerProvider: controllerProvider)
+            }
+
+            Button("cd to Folder...") {
+                model.chooseDirectoryAndChange(controllerProvider: controllerProvider)
             }
         } label: {
             Image(systemName: "folder")
@@ -313,7 +469,7 @@ struct GhosttyQuickActionsTitlebarView: View {
                 }
             }
 
-            Picker("Record", selection: $model.dictationSeconds) {
+            Picker("Shell Fallback Record", selection: $model.dictationSeconds) {
                 ForEach(model.dictationDurations, id: \.self) { seconds in
                     Text("\(seconds)s").tag(seconds)
                 }
@@ -329,7 +485,7 @@ struct GhosttyQuickActionsTitlebarView: View {
                 }
             }
 
-            Picker("After", selection: $model.finishSoundThreshold) {
+            Picker("After Running", selection: $model.finishSoundThreshold) {
                 ForEach(model.notifyThresholds, id: \.self) { seconds in
                     Text("\(seconds)s").tag(seconds)
                 }
@@ -352,6 +508,7 @@ private final class SpeechSession {
         case recognizerUnavailable
         case microphoneFailed(String)
         case noTranscript
+        case cancelled
 
         var errorDescription: String? {
             switch self {
@@ -363,12 +520,13 @@ private final class SpeechSession {
                 "Microphone failed: \(message)"
             case .noTranscript:
                 "No speech transcript"
+            case .cancelled:
+                "Dictation cancelled"
             }
         }
     }
 
     private let localeIdentifier: String
-    private let seconds: TimeInterval
     private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -376,9 +534,8 @@ private final class SpeechSession {
     private var transcript = ""
     private var finished = false
 
-    init(localeIdentifier: String, seconds: TimeInterval) {
+    init(localeIdentifier: String) {
         self.localeIdentifier = localeIdentifier
-        self.seconds = max(1, seconds)
     }
 
     func start(completion: @escaping (Result<String, Error>) -> Void) {
@@ -402,6 +559,10 @@ private final class SpeechSession {
     func stop() {
         stopCapture()
         finishIfReady()
+    }
+
+    func cancel() {
+        finish(.failure(SpeechError.cancelled))
     }
 
     private func startRecording() {
@@ -441,13 +602,8 @@ private final class SpeechSession {
             return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
-            guard let self else { return }
-            self.stopCapture()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                self.finishIfReady()
-            }
-        }
+        // Recording is intentionally open-ended. Return/Enter stops and commits,
+        // Escape cancels; see GhosttyQuickActionsModel's local key monitor.
     }
 
     private func stopCapture() {
