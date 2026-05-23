@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Speech
 import SwiftUI
+import Translation
 
 /// Small native titlebar controls for high-frequency terminal actions.
 ///
@@ -83,6 +84,7 @@ final class GhosttyQuickActionsModel: ObservableObject {
 
     private var speechSession: SpeechSession?
     private var dictationKeyMonitor: Any?
+    private var cachedEnglishTranslationSession: Any?
 
     private enum Keys {
         static let language = "GhosttyQuickActions.language"
@@ -90,6 +92,20 @@ final class GhosttyQuickActionsModel: ObservableObject {
         static let finishSoundName = "GhosttyQuickActions.finishSoundName"
         static let finishSoundThreshold = "GhosttyQuickActions.finishSoundThreshold"
         static let dictationSeconds = "GhosttyQuickActions.dictationSeconds"
+    }
+
+    enum QuickActionError: LocalizedError {
+        case translationUnavailable
+        case emptyTranslation
+
+        var errorDescription: String? {
+            switch self {
+            case .translationUnavailable:
+                "Russian to English translation is unavailable"
+            case .emptyTranslation:
+                "Translation returned no text"
+            }
+        }
     }
 
     private init() {
@@ -118,11 +134,15 @@ final class GhosttyQuickActionsModel: ObservableObject {
         }
 
         isDictating = true
-        statusText = "Recording. Press Enter to stop."
+        let outputLanguage = language
+        let inputLanguage = recognitionLocaleIdentifier(for: outputLanguage)
+        statusText = outputLanguage == "en_US"
+            ? "Recording Russian. Press Enter to translate."
+            : "Recording. Press Enter to stop."
         installDictationKeyMonitor()
         QuickActionSound.play("Tink")
 
-        let session = SpeechSession(localeIdentifier: language)
+        let session = SpeechSession(localeIdentifier: inputLanguage)
         speechSession = session
         session.start { [weak self] result in
             Task { @MainActor in
@@ -139,9 +159,18 @@ final class GhosttyQuickActionsModel: ObservableObject {
                         QuickActionSound.play("Basso")
                         return
                     }
-                    controllerProvider()?.ghosttyQuickActionsInsertText(cleanTranscript)
-                    self.statusText = nil
-                    QuickActionSound.play("Pop")
+                    do {
+                        self.statusText = outputLanguage == "en_US" ? "Translating..." : nil
+                        let finalText = try await self.outputText(
+                            from: cleanTranscript,
+                            outputLanguage: outputLanguage)
+                        controllerProvider()?.ghosttyQuickActionsInsertText(finalText)
+                        self.statusText = nil
+                        QuickActionSound.play("Pop")
+                    } catch {
+                        self.statusText = error.localizedDescription
+                        QuickActionSound.play("Basso")
+                    }
 
                 case .failure(let error):
                     self.statusText = error.localizedDescription
@@ -207,6 +236,54 @@ final class GhosttyQuickActionsModel: ObservableObject {
         }
 
         QuickActionSound.play(nextEnabled ? "Tink" : "Pop")
+    }
+
+    private func recognitionLocaleIdentifier(for outputLanguage: String) -> String {
+        outputLanguage == "en_US" ? "ru_RU" : outputLanguage
+    }
+
+    private func outputText(from transcript: String, outputLanguage: String) async throws -> String {
+        guard outputLanguage == "en_US" else { return transcript }
+        return try await translateRussianToEnglish(transcript)
+    }
+
+    private func translateRussianToEnglish(_ text: String) async throws -> String {
+        guard #available(macOS 26.0, *) else {
+            throw QuickActionError.translationUnavailable
+        }
+
+        let session = englishTranslationSession()
+        try await session.prepareTranslation()
+
+        let response = try await session.translate(text)
+        let translated = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !translated.isEmpty else {
+            throw QuickActionError.emptyTranslation
+        }
+
+        return translated
+    }
+
+    @available(macOS 26.0, *)
+    private func englishTranslationSession() -> TranslationSession {
+        if let cachedEnglishTranslationSession = cachedEnglishTranslationSession as? TranslationSession {
+            return cachedEnglishTranslationSession
+        }
+
+        let session: TranslationSession
+        if #available(macOS 26.4, *) {
+            session = TranslationSession(
+                installedSource: Locale.Language(identifier: "ru"),
+                target: Locale.Language(identifier: "en"),
+                preferredStrategy: .lowLatency)
+        } else {
+            session = TranslationSession(
+                installedSource: Locale.Language(identifier: "ru"),
+                target: Locale.Language(identifier: "en"))
+        }
+
+        cachedEnglishTranslationSession = session
+        return session
     }
 
     func chooseFilesAndInsertAbsolute(controllerProvider: @escaping () -> TerminalController?) {
@@ -356,11 +433,16 @@ final class GhosttyQuickActionsModel: ObservableObject {
             export GHOSTTY_NOTIFY_MIN_SECONDS=\(finishSoundThreshold)
             export GHOSTTY_NOTIFY_SOUND=\(finishSoundName)
             export GHOSTTY_DICTATE_SECONDS=\(dictationSeconds)
-            export GHOSTTY_DICTATE_LOCALE=\(language)
+            export GHOSTTY_DICTATE_LOCALE=\(recognitionLocaleIdentifier(for: language))
+            export GHOSTTY_DICTATE_OUTPUT_LOCALE=\(language)
 
             """
+            let settingsURL = configDir.appendingPathComponent("settings.zsh")
+            let existingSettings = try? String(contentsOf: settingsURL, encoding: .utf8)
+            guard existingSettings != settings else { return }
+
             try settings.write(
-                to: configDir.appendingPathComponent("settings.zsh"),
+                to: settingsURL,
                 atomically: true,
                 encoding: .utf8)
         } catch {
@@ -463,7 +545,7 @@ struct GhosttyQuickActionsTitlebarView: View {
 
     private var soundMenu: some View {
         Menu {
-            Picker("Transcription", selection: $model.language) {
+            Picker("Output Language", selection: $model.language) {
                 ForEach(model.languages) { language in
                     Text(language.label).tag(language.id)
                 }
