@@ -24,6 +24,9 @@ class TerminalWindow: NSWindow {
     /// Update notification UI in titlebar
     private let updateAccessory = NSTitlebarAccessoryViewController()
 
+    /// Native quick action UI in titlebar
+    private let quickActionsAccessory = NSTitlebarAccessoryViewController()
+
     /// Visual indicator that mirrors the selected tab color.
     private lazy var tabColorIndicator: NSHostingView<TabColorIndicatorView> = {
         let view = NSHostingView(rootView: TabColorIndicatorView(tabColor: tabColor))
@@ -153,6 +156,15 @@ class TerminalWindow: NSWindow {
                 addTitlebarAccessoryViewController(updateAccessory)
                 updateAccessory.view.translatesAutoresizingMaskIntoConstraints = false
             }
+
+            quickActionsAccessory.identifier = NSUserInterfaceItemIdentifier("_ghosttyQuickActions")
+            quickActionsAccessory.layoutAttribute = .right
+            quickActionsAccessory.view = NonDraggableHostingView(rootView: GhosttyQuickActionsTitlebarView(
+                controllerProvider: { [weak self] in
+                    self?.terminalController
+                }))
+            addTitlebarAccessoryViewController(quickActionsAccessory)
+            quickActionsAccessory.view.translatesAutoresizingMaskIntoConstraints = false
         }
 
         // Setup the accessory view for tabs that shows our keyboard shortcuts,
