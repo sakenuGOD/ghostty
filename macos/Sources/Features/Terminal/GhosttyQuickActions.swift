@@ -3,6 +3,7 @@ import AVFoundation
 import Speech
 import SwiftUI
 import Translation
+import UniformTypeIdentifiers
 
 /// Small native titlebar controls for high-frequency terminal actions.
 ///
@@ -42,6 +43,47 @@ final class GhosttyQuickActionsModel: ObservableObject {
 
     let notifyThresholds = [3, 8, 15, 30, 60]
     let dictationDurations = [3, 5, 8, 12]
+
+    private struct EditorCandidate {
+        let label: String
+        let bundleIdentifiers: [String]
+        let applicationNames: [String]
+    }
+
+    private let editorCandidates: [EditorCandidate] = [
+        .init(
+            label: "VS Code",
+            bundleIdentifiers: ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"],
+            applicationNames: ["Visual Studio Code", "Visual Studio Code - Insiders"]),
+        .init(
+            label: "Cursor",
+            bundleIdentifiers: ["com.todesktop.230313mzl4w4u92"],
+            applicationNames: ["Cursor"]),
+        .init(
+            label: "Zed",
+            bundleIdentifiers: ["dev.zed.Zed"],
+            applicationNames: ["Zed"]),
+        .init(
+            label: "Windsurf",
+            bundleIdentifiers: ["com.exafunction.windsurf"],
+            applicationNames: ["Windsurf"]),
+        .init(
+            label: "Xcode",
+            bundleIdentifiers: ["com.apple.dt.Xcode"],
+            applicationNames: ["Xcode"]),
+        .init(
+            label: "Sublime Text",
+            bundleIdentifiers: ["com.sublimetext.4", "com.sublimetext.3"],
+            applicationNames: ["Sublime Text"]),
+        .init(
+            label: "Nova",
+            bundleIdentifiers: ["com.panic.Nova"],
+            applicationNames: ["Nova"]),
+        .init(
+            label: "BBEdit",
+            bundleIdentifiers: ["com.barebones.bbedit"],
+            applicationNames: ["BBEdit"]),
+    ]
 
     @Published var floatOnTopEnabled: Bool
     @Published var isDictating = false
@@ -96,6 +138,25 @@ final class GhosttyQuickActionsModel: ObservableObject {
         }
     }
 
+    @Published var editorApplicationPath: String? {
+        didSet {
+            saveOptionalString(editorApplicationPath, for: Keys.editorApplicationPath)
+        }
+    }
+
+    var editorDisplayName: String {
+        guard let url = resolvedEditorApplicationURL() else {
+            return "Choose Editor"
+        }
+
+        return displayName(for: url)
+    }
+
+    var hasCustomEditorApplication: Bool {
+        guard let path = editorApplicationPath else { return false }
+        return !path.isEmpty
+    }
+
     private var speechSession: SpeechSession?
     private var dictationKeyMonitor: Any?
     private var cachedEnglishTranslationSession: Any?
@@ -108,6 +169,7 @@ final class GhosttyQuickActionsModel: ObservableObject {
         static let finishSoundName = "GhosttyQuickActions.finishSoundName"
         static let finishSoundThreshold = "GhosttyQuickActions.finishSoundThreshold"
         static let dictationSeconds = "GhosttyQuickActions.dictationSeconds"
+        static let editorApplicationPath = "GhosttyQuickActions.editorApplicationPath"
     }
 
     enum QuickActionError: LocalizedError {
@@ -144,6 +206,7 @@ final class GhosttyQuickActionsModel: ObservableObject {
         self.finishSoundThreshold = threshold == 0 ? 30 : threshold
         let seconds = defaults.integer(forKey: Keys.dictationSeconds)
         self.dictationSeconds = seconds == 0 ? 5 : seconds
+        self.editorApplicationPath = defaults.string(forKey: Keys.editorApplicationPath)
         let defaultWindowLevel = UserDefaults.ghostty.value(
             forKey: TerminalWindow.defaultLevelKey) as? NSWindow.Level
         self.floatOnTopEnabled = defaultWindowLevel == .floating
@@ -403,6 +466,39 @@ final class GhosttyQuickActionsModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func openWorkingDirectoryInEditor(controllerProvider: @escaping () -> TerminalController?) {
+        guard let url = controllerProvider()?.ghosttyQuickActionsWorkingDirectory else {
+            QuickActionSound.play("Basso")
+            return
+        }
+
+        openFoldersInEditor([url], controllerProvider: controllerProvider)
+    }
+
+    func chooseDirectoryAndOpenInEditor(controllerProvider: @escaping () -> TerminalController?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Open in Editor"
+        panel.message = "Choose folders to open in the configured editor."
+        panel.directoryURL = controllerProvider()?.ghosttyQuickActionsWorkingDirectory
+
+        present(panel, controllerProvider: controllerProvider) { urls in
+            self.openFoldersInEditor(urls, controllerProvider: controllerProvider)
+        }
+    }
+
+    func chooseEditorApplication(controllerProvider: @escaping () -> TerminalController?) {
+        chooseEditorApplication(controllerProvider: controllerProvider, afterChoose: nil)
+    }
+
+    func resetEditorApplication() {
+        editorApplicationPath = nil
+        statusText = "Using auto-detected editor"
+        QuickActionSound.play("Pop")
+    }
+
     func playFinishSound() {
         guard finishSoundEnabled else {
             QuickActionSound.play("Basso")
@@ -438,6 +534,128 @@ final class GhosttyQuickActionsModel: ObservableObject {
         }
 
         return path
+    }
+
+    private func openFoldersInEditor(
+        _ urls: [URL],
+        controllerProvider: @escaping () -> TerminalController?
+    ) {
+        let folders = urls.filter { isDirectory($0) }
+        guard !folders.isEmpty else {
+            QuickActionSound.play("Basso")
+            return
+        }
+
+        guard let appURL = resolvedEditorApplicationURL() else {
+            chooseEditorApplication(controllerProvider: controllerProvider) { [weak self] in
+                self?.openFoldersInEditor(folders, controllerProvider: controllerProvider)
+            }
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(folders, withApplicationAt: appURL, configuration: configuration) { _, error in
+            Task { @MainActor in
+                if let error {
+                    Ghostty.logger.warning("failed to open folder in editor: \(error.localizedDescription)")
+                    QuickActionSound.play("Basso")
+                } else {
+                    QuickActionSound.play("Pop")
+                }
+            }
+        }
+    }
+
+    private func chooseEditorApplication(
+        controllerProvider: @escaping () -> TerminalController?,
+        afterChoose: (() -> Void)?
+    ) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use Editor"
+        panel.message = "Choose an app to open folders from Ghostty."
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowedContentTypes = [.applicationBundle]
+
+        present(panel, controllerProvider: controllerProvider) { urls in
+            guard let url = urls.first else { return }
+            self.editorApplicationPath = url.path
+            self.statusText = "Editor: \(self.displayName(for: url))"
+            QuickActionSound.play("Pop")
+            afterChoose?()
+        }
+    }
+
+    private func resolvedEditorApplicationURL() -> URL? {
+        if let path = editorApplicationPath, !path.isEmpty {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+
+        return autoDetectedEditorApplicationURL()
+    }
+
+    private func autoDetectedEditorApplicationURL() -> URL? {
+        for candidate in editorCandidates {
+            for bundleIdentifier in candidate.bundleIdentifiers {
+                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+                    return url
+                }
+            }
+
+            for applicationName in candidate.applicationNames {
+                if let url = standardApplicationURL(named: applicationName) {
+                    return url
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func standardApplicationURL(named name: String) -> URL? {
+        let fileManager = FileManager.default
+        let applicationFileName = "\(name).app"
+        let directories = [
+            URL(fileURLWithPath: "/Applications"),
+            fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Applications"),
+            URL(fileURLWithPath: "/System/Applications"),
+            URL(fileURLWithPath: "/Applications/Utilities"),
+        ]
+
+        for directory in directories {
+            let url = directory.appendingPathComponent(applicationFileName)
+            if fileManager.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+
+        return nil
+    }
+
+    private func displayName(for appURL: URL) -> String {
+        if let bundle = Bundle(url: appURL) {
+            if let displayName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String {
+                return displayName
+            }
+
+            if let bundleName = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String {
+                return bundleName
+            }
+        }
+
+        return appURL.deletingPathExtension().lastPathComponent
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
     }
 
     private func writeShellSettings() {
@@ -487,6 +705,14 @@ final class GhosttyQuickActionsModel: ObservableObject {
 
     private func saveInt(_ value: Int, for key: String) {
         UserDefaults.standard.set(value, forKey: key)
+    }
+
+    private func saveOptionalString(_ value: String?, for key: String) {
+        if let value, !value.isEmpty {
+            UserDefaults.standard.set(value, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
     }
 }
 
@@ -544,13 +770,35 @@ struct GhosttyQuickActionsTitlebarView: View {
                 model.insertWorkingDirectory(controllerProvider: controllerProvider)
             }
 
-            Button("Open Working Directory") {
+            Button("Open Working Directory in Finder") {
                 model.openWorkingDirectoryInFinder(controllerProvider: controllerProvider)
+            }
+
+            Button("Open Working Directory in Editor") {
+                model.openWorkingDirectoryInEditor(controllerProvider: controllerProvider)
+            }
+
+            Button("Open Folder in Editor...") {
+                model.chooseDirectoryAndOpenInEditor(controllerProvider: controllerProvider)
             }
 
             Button("cd to Folder...") {
                 model.chooseDirectoryAndChange(controllerProvider: controllerProvider)
             }
+
+            Divider()
+
+            Button("Choose Editor Application...") {
+                model.chooseEditorApplication(controllerProvider: controllerProvider)
+            }
+
+            if model.hasCustomEditorApplication {
+                Button("Use Auto-Detected Editor") {
+                    model.resetEditorApplication()
+                }
+            }
+
+            Text("Editor: \(model.editorDisplayName)")
         } label: {
             Image(systemName: "folder")
                 .frame(width: 22, height: 20)
